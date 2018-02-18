@@ -12,12 +12,10 @@ import torchvision.transforms as transforms
 import torchvision.utils as vutils
 from torch.autograd import Variable
 import os
-from torch import autograd
 
-import models.dcgan_v2 as dcganv2
-import models.dcgan as dcgan
+import models.dcgan_backup as dcgan
 import models.mlp as mlp
-import numpy as np
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', required=True, help='cifar10 | lsun | imagenet | folder | lfw ')
 parser.add_argument('--dataroot', required=True, help='path to dataset')
@@ -48,44 +46,11 @@ parser.add_argument('--adam', action='store_true', help='Whether to use adam (de
 opt = parser.parse_args()
 print(opt)
 
-
-
-def calc_gradient_penalty(netD, real_data, fake_data, labels):
-    """
-    calculate gradient penalty
-    """
-    #print real_data.size()
-    alpha = torch.rand(opt.batchSize, 1)
-    alpha = alpha.expand(real_data.size())
-    alpha = alpha.cuda() if opt.cuda else alpha
-
-    interpolates = alpha * real_data + ((1 - alpha) * fake_data)
-
-    if opt.cuda:
-        interpolates = interpolates.cuda()
-    interpolates = Variable(interpolates, requires_grad=True)
-
-    disc_interpolates = netD(interpolates, labels)
-
-    gradients = autograd.grad(outputs=disc_interpolates, inputs=interpolates,
-                              grad_outputs=torch.ones(disc_interpolates.size()).cuda() if opt.cuda else torch.ones(
-                                  disc_interpolates.size()),
-                              create_graph=True, retain_graph=True, only_inputs=True)[0]
-
-    gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean() * opt.lamb
-    return gradient_penalty
-
-
-
 if opt.experiment is None:
     opt.experiment = 'samples'
 os.system('mkdir {0}'.format(opt.experiment))
 
 opt.manualSeed = random.randint(1, 10000) # fix seed
-
-# opt.lambda - parameter of interpolation
-opt.lamb = 0.5
-###############3
 print("Random Seed: ", opt.manualSeed)
 random.seed(opt.manualSeed)
 torch.manual_seed(opt.manualSeed)
@@ -145,8 +110,7 @@ if opt.noBN:
 elif opt.mlp_G:
     netG = mlp.MLP_G(opt.imageSize, nz, nc, ngf, ngpu)
 else:
-    #netG = dcgan.DCGAN_G(opt.imageSize, nz, nc, ngf, ngpu, n_extra_layers)
-    netG = dcganv2._netG(opt.imageSize, nz, nc, ngf, ngpu, n_extra_layers)
+    netG = dcgan.DCGAN_G(opt.imageSize, nz, nc, ngf, ngpu, n_extra_layers)
 
 netG.apply(weights_init)
 if opt.netG != '': # load checkpoint if needed
@@ -156,9 +120,7 @@ print(netG)
 if opt.mlp_D:
     netD = mlp.MLP_D(opt.imageSize, nz, nc, ndf, ngpu)
 else:
-    #netD = dcgan.DCGAN_D(opt.imageSize, nz, nc, ndf, ngpu, n_extra_layers)
-    netD = dcganv2._netD(opt.imageSize, nz, nc, ndf, ngpu, n_extra_layers)
-
+    netD = dcgan.DCGAN_D(opt.imageSize, nz, nc, ndf, ngpu, n_extra_layers)
     netD.apply(weights_init)
 
 if opt.netD != '':
@@ -166,10 +128,8 @@ if opt.netD != '':
 print(netD)
 
 input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
-label = torch.FloatTensor(opt.batchSize, 1)
 noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
 fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
-#fixed_labels = torch.FloatTensor(np.arange(43))
 one = torch.FloatTensor([1])
 mone = one * -1
 
@@ -177,7 +137,6 @@ if opt.cuda:
     netD.cuda()
     netG.cuda()
     input = input.cuda()
-    label = label.cuda()
     one, mone = one.cuda(), mone.cuda()
     noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
 
@@ -210,48 +169,33 @@ for epoch in range(opt.niter):
             j += 1
 
             # clamp parameters to a cube
-            #for p in netD.parameters():
-            #    p.data.clamp_(opt.clamp_lower, opt.clamp_upper)
+            for p in netD.parameters():
+                p.data.clamp_(opt.clamp_lower, opt.clamp_upper)
 
             data = data_iter.next()
             i += 1
 
             # train with real
-            real_cpu, labels_real_cpu = data
-            #print (labels_real_cpu)
-            labels_real_cpu =labels_real_cpu.float()
+            real_cpu, _ = data
             netD.zero_grad()
             batch_size = real_cpu.size(0)
 
             if opt.cuda:
                 real_cpu = real_cpu.cuda()
-                labels_real_cpu = labels_real_cpu.cuda()
             input.resize_as_(real_cpu).copy_(real_cpu)
-            label.resize_as_(labels_real_cpu).copy_(labels_real_cpu)
             inputv = Variable(input)
-            
-            labelv = Variable (label)
-            
-            errD_real = netD(inputv, labelv)
-            print (errD_real)
-            #print (errD_real.size())
+
+            errD_real = netD(inputv)
             errD_real.backward(one)
-            batchsize = min(opt.batchSize, input.size(0))
+
             # train with fake
-            noise.resize_(batchsize, nz, 1, 1).normal_(0, 1)
+            noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
             noisev = Variable(noise, volatile = True) # totally freeze netG
-            fake = Variable(netG(noisev, labelv).data)
+            fake = Variable(netG(noisev).data)
             inputv = fake
-            errD_fake = netD(inputv, labelv)
-            
+            errD_fake = netD(inputv)
             errD_fake.backward(mone)
-            
-            # gradianet penalty instead of weight clipping
-            gradient_penalty = calc_gradient_penalty(netD, real_cpu, fake.data , labelv)
-            gradient_penalty.backward()
-            
-            errD = errD_real - errD_fake + gradient_penalty
-            
+            errD = errD_real - errD_fake
             optimizerD.step()
 
         ############################
@@ -264,17 +208,10 @@ for epoch in range(opt.niter):
         # make sure we feed a full batch of noise
         noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
         noisev = Variable(noise)
-        labelv = Variable(torch.FloatTensor(np.repeat(np.arange(42),opt.batchSize/42 + 1)[:opt.batchSize])).cuda()
-        print (noisev.size(), labelv.size())
-        fake = netG(noisev, labelv)
-        errG = netD(fake, labelv)
+        fake = netG(noisev)
+        errG = netD(fake)
         errG.backward(one)
-        a =list(netG.parameters())[0].clone()
-
         optimizerG.step()
-        b= list(netG.parameters())[0].clone()
-        print ( torch.equal(a.data,b.data))
-
         gen_iterations += 1
 
         print('[%d/%d][%d/%d][%d] Loss_D: %f Loss_G: %f Loss_D_real: %f Loss_D_fake %f'
@@ -283,7 +220,7 @@ for epoch in range(opt.niter):
         if gen_iterations % 500 == 0:
             real_cpu = real_cpu.mul(0.5).add(0.5)
             vutils.save_image(real_cpu, '{0}/real_samples.png'.format(opt.experiment))
-            fake = netG(Variable(fixed_noise, volatile=True), labelv)
+            fake = netG(Variable(fixed_noise, volatile=True))
             fake.data = fake.data.mul(0.5).add(0.5)
             vutils.save_image(fake.data, '{0}/fake_samples_{1}.png'.format(opt.experiment, gen_iterations))
 

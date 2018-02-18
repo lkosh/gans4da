@@ -13,11 +13,14 @@ import torchvision.utils as vutils
 from torch.autograd import Variable
 import os
 from torch import autograd
+import torch.nn.functional as F
 
-import models.dcgan_v2 as dcganv2
+import models.dcgan_v2_wcgan as dcganv2
 import models.dcgan as dcgan
 import models.mlp as mlp
 import numpy as np
+
+from loss import FocalLoss
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', required=True, help='cifar10 | lsun | imagenet | folder | lfw ')
 parser.add_argument('--dataroot', required=True, help='path to dataset')
@@ -31,6 +34,8 @@ parser.add_argument('--ndf', type=int, default=64)
 parser.add_argument('--niter', type=int, default=25, help='number of epochs to train for')
 parser.add_argument('--lrD', type=float, default=0.00005, help='learning rate for Critic, default=0.00005')
 parser.add_argument('--lrG', type=float, default=0.00005, help='learning rate for Generator, default=0.00005')
+parser.add_argument('--lrC', type=float, default=0.00005, help='learning rate for Classifier, default=0.00005')
+
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda'  , action='store_true', help='enables cuda')
 parser.add_argument('--ngpu'  , type=int, default=1, help='number of GPUs to use')
@@ -46,8 +51,10 @@ parser.add_argument('--n_extra_layers', type=int, default=0, help='Number of ext
 parser.add_argument('--experiment', default=None, help='Where to store samples and models')
 parser.add_argument('--adam', action='store_true', help='Whether to use adam (default is rmsprop)')
 opt = parser.parse_args()
-print(opt)
+EPS = 1e-12
 
+print(opt)
+torch.backends.cudnn.enabled = False
 
 
 def calc_gradient_penalty(netD, real_data, fake_data, labels):
@@ -122,6 +129,7 @@ elif opt.dataset == 'cifar10':
     )
 assert dataset
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize,
+                                                  
                                          shuffle=True, num_workers=int(opt.workers))
 
 ngpu = int(opt.ngpu)
@@ -153,6 +161,12 @@ if opt.netG != '': # load checkpoint if needed
     netG.load_state_dict(torch.load(opt.netG))
 print(netG)
 
+
+# classifier
+netC = dcganv2._netC(opt.imageSize, nz, nc, ndf, ngpu, n_extra_layers)
+netC.apply(weights_init)
+
+
 if opt.mlp_D:
     netD = mlp.MLP_D(opt.imageSize, nz, nc, ndf, ngpu)
 else:
@@ -166,126 +180,214 @@ if opt.netD != '':
 print(netD)
 
 input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
-label = torch.FloatTensor(opt.batchSize, 1)
+label = torch.LongTensor(opt.batchSize, 1)
 noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
+y_onehot = torch.LongTensor(opt.batchSize, 43)
 fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
 #fixed_labels = torch.FloatTensor(np.arange(43))
 one = torch.FloatTensor([1])
 mone = one * -1
 
+label_compare = torch.FloatTensor(opt.batchSize)
+
+
 if opt.cuda:
     netD.cuda()
     netG.cuda()
+    netC.cuda()
     input = input.cuda()
     label = label.cuda()
     one, mone = one.cuda(), mone.cuda()
     noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
+    y_onehot = y_onehot.cuda()
+    label_compare = label_compare.cuda()
 
 # setup optimizer
 if opt.adam:
     optimizerD = optim.Adam(netD.parameters(), lr=opt.lrD, betas=(opt.beta1, 0.999))
     optimizerG = optim.Adam(netG.parameters(), lr=opt.lrG, betas=(opt.beta1, 0.999))
+    optimizerC = optim.Adam(netC.parameters(), lr=opt.lrC, betas=(opt.beta1, 0.999))
+
 else:
     optimizerD = optim.RMSprop(netD.parameters(), lr = opt.lrD)
     optimizerG = optim.RMSprop(netG.parameters(), lr = opt.lrG)
-
+    optimizerC = optim.RMSprop(netC.parameters(), lr = opt.lrC)
+Diters = 1
 gen_iterations = 0
+criterion = nn.BCELoss()#FocalLoss()#nn.BCELoss()
+criterion_MSE = nn.MSELoss()
+
 for epoch in range(opt.niter):
     data_iter = iter(dataloader)
     i = 0
+    
     while i < len(dataloader):
-        ############################
-        # (1) Update D network
-        ###########################
         for p in netD.parameters(): # reset requires_grad
             p.requires_grad = True # they are set to False below in netG update
-
-        # train the discriminator Diters times
+        
         if gen_iterations < 25 or gen_iterations % 500 == 0:
             Diters = 100
         else:
             Diters = opt.Diters
         j = 0
+        
         while j < Diters and i < len(dataloader):
+            ############################
+            # (1) Update D network
+            ###########################
+
             j += 1
 
-            # clamp parameters to a cube
-            #for p in netD.parameters():
-            #    p.data.clamp_(opt.clamp_lower, opt.clamp_upper)
+            # train the discriminator Diters times
+
+
+
+                # clamp parameters to a cube
+            for p in netD.parameters():
+                p.data.clamp_(opt.clamp_lower, opt.clamp_upper)
 
             data = data_iter.next()
+            netD.zero_grad()
+
             i += 1
 
             # train with real
             real_cpu, labels_real_cpu = data
+
             #print (labels_real_cpu)
-            labels_real_cpu =labels_real_cpu.float()
-            netD.zero_grad()
+            labels_real_cpu =labels_real_cpu.long()
             batch_size = real_cpu.size(0)
+
+
 
             if opt.cuda:
                 real_cpu = real_cpu.cuda()
                 labels_real_cpu = labels_real_cpu.cuda()
+
             input.resize_as_(real_cpu).copy_(real_cpu)
             label.resize_as_(labels_real_cpu).copy_(labels_real_cpu)
             inputv = Variable(input)
+
+            #labelv = Variable (label.float())
+            label.resize_(label.shape[0], 1)
+            tmp = torch.LongTensor(label.shape[0], 43).cuda()
+            #print (label.shape, tmp.shape)
+            y_onehot.resize_as_(tmp)
+            tmp.zero_()
+            tmp.scatter_(1, label, 1)
+            #print (tmp.shape)
+            labelv = Variable(tmp.float())
+                #print (label.unsqueeze(1).size())
+            try:
+                y_onehot.zero_().scatter_(1, label.unsqueeze(1), 1)
+                #print (1)
+            except:
+                y_onehot.zero_().scatter_(1, label, 1)
+                #print (2)
+
+
+            y_onehot = torch.unsqueeze(torch.unsqueeze(y_onehot, 2),3).expand(label.shape[0], 43, 64,64)
+            y_onehotv = Variable(y_onehot.float())
+
+            errD_real = netD(inputv, y_onehotv)
+            real_data = inputv
             
-            labelv = Variable (label)
-            
-            errD_real = netD(inputv, labelv)
-            print (errD_real)
-            #print (errD_real.size())
+            errD_real = torch.mean(errD_real)
+
             errD_real.backward(one)
+            #print (errD_real.size())
+
             batchsize = min(opt.batchSize, input.size(0))
             # train with fake
             noise.resize_(batchsize, nz, 1, 1).normal_(0, 1)
             noisev = Variable(noise, volatile = True) # totally freeze netG
             fake = Variable(netG(noisev, labelv).data)
             inputv = fake
-            errD_fake = netD(inputv, labelv)
-            
+            #inputv = Variable(inputv)
+            #print ("inputv", inputv.size())
+            errD_fake = netD(inputv, y_onehotv)
+            #print (errD_fake)
+
+
+            errD_fake = torch.mean(errD_fake)
+            #print (errD_fake.volatile, label_comparev.volatile, inputv.volatile, y_onehotv.volatile)
             errD_fake.backward(mone)
             
-            # gradianet penalty instead of weight clipping
-            gradient_penalty = calc_gradient_penalty(netD, real_cpu, fake.data , labelv)
-            gradient_penalty.backward()
+            #gradient_penalty = calc_gradient_penalty(netD, real_data.data, fake.data, labelv)
+            #gradient_penalty.backward()
+            errD = errD_real - errD_fake #+ gradient_penalty
+            #print (errD)
+            #print ("errD", errD)
+            #errD.backward()
             
-            errD = errD_real - errD_fake + gradient_penalty
-            
+
             optimizerD.step()
 
         ############################
         # (2) Update G network
         ###########################
+        
         for p in netD.parameters():
             p.requires_grad = False # to avoid computation
-        netG.zero_grad()
+        batchsize = min(opt.batchSize, input.size(0))
+
+
         # in case our last batch was the tail batch of the dataloader,
         # make sure we feed a full batch of noise
-        noise.resize_(opt.batchSize, nz, 1, 1).normal_(0, 1)
-        noisev = Variable(noise)
-        labelv = Variable(torch.FloatTensor(np.repeat(np.arange(42),opt.batchSize/42 + 1)[:opt.batchSize])).cuda()
-        print (noisev.size(), labelv.size())
-        fake = netG(noisev, labelv)
-        errG = netD(fake, labelv)
-        errG.backward(one)
-        a =list(netG.parameters())[0].clone()
+        netG.zero_grad()
+        netC.zero_grad()
 
+
+        noise.resize_(batchsize, nz, 1, 1).normal_(0, 1)
+        noisev = Variable(noise)
+        #labelv = Variable(torch.FloatTensor(np.repeat(np.arange(42),opt.batchSize/42 + 1)[:opt.batchSize])).cuda()
+        fake = netG(noisev, labelv)
+        inputv = fake
+        #print (noisev.size(), labelv.size())
+        fake_labels = netD(inputv, y_onehotv)
+        #print (fake_labels)
+        cat_real = netC(real_data, y_onehotv)
+        cat_fake = netC(fake, y_onehotv)
+        
+        label_compare.resize_(batchsize).fill_(1 ) # use smooth label for discriminator
+        label_comparev = Variable(label_compare)
+        
+        print (label_comparev.size(), cat_real.size())
+        cat_loss_real = criterion(cat_real, label_comparev)
+        
+        label_compare.resize_(batch_size).fill_(0 ) # use smooth label for discriminator
+        label_comparev = Variable(label_compare)
+        
+        cat_loss_fake = criterion(cat_fake, label_comparev)
+        
+        cat_loss = cat_loss_real + cat_loss_fake
+        cat_loss.backward(retain_graph=True)
+        #a = list(netC.parameters())[0]
+        
+        optimizerC.step()
+        #b = list(netC.parameters())[0]
+        #print (b.data)
+        #print (a.grad)
+        #print (torch.equal(a.data, b.data))
+        
+        
+        errG =torch.mean(fake_labels) - 3/4 *cat_loss_fake
+        
+       
+        errG.backward(one)
         optimizerG.step()
-        b= list(netG.parameters())[0].clone()
-        print ( torch.equal(a.data,b.data))
 
         gen_iterations += 1
 
         print('[%d/%d][%d/%d][%d] Loss_D: %f Loss_G: %f Loss_D_real: %f Loss_D_fake %f'
             % (epoch, opt.niter, i, len(dataloader), gen_iterations,
-            errD.data[0], errG.data[0], errD_real.data[0], errD_fake.data[0]))
+            errD.data.cpu().numpy()[0], errG.data.cpu().numpy()[0], errD_real.data.cpu().numpy()[0], errD_fake.data.cpu().numpy()[0]))
         if gen_iterations % 500 == 0:
             real_cpu = real_cpu.mul(0.5).add(0.5)
-            vutils.save_image(real_cpu, '{0}/real_samples.png'.format(opt.experiment))
+            vutils.save_image(real_cpu, '{0}/real_samples_wgan.png'.format(opt.experiment))
             fake = netG(Variable(fixed_noise, volatile=True), labelv)
             fake.data = fake.data.mul(0.5).add(0.5)
-            vutils.save_image(fake.data, '{0}/fake_samples_{1}.png'.format(opt.experiment, gen_iterations))
+            vutils.save_image(fake.data, '{0}/fake_samples_wgan_{1}.png'.format(opt.experiment, gen_iterations))
 
     # do checkpointing
     torch.save(netG.state_dict(), '{0}/netG_epoch_{1}.pth'.format(opt.experiment, epoch))
