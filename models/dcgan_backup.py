@@ -43,9 +43,8 @@ class DCGAN_D(nn.Module):
         self.main = main
 
 
-    def forward(self, input, labels):
-        print (input.size(), labels.size())
-        #input  = torch.cat([input,labels],0)
+    def forward(self, input):
+        
         if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
             output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
         else: 
@@ -100,7 +99,7 @@ class DCGAN_G(nn.Module):
                         nn.Tanh())
         self.main = main
 
-    def forward(self, input, labels):
+    def forward(self, input):
         if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
             output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
         else: 
@@ -145,7 +144,7 @@ class DCGAN_D_nobn(nn.Module):
         self.main = main
 
 
-    def forward(self, input, labels):
+    def forward(self, input):
         if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
             output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
         else: 
