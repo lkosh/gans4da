@@ -15,7 +15,7 @@ import os
 import models.dcgan_backup as dcgan
 #import models.dcgan as dcgan
 from torch import autograd
-
+import glob
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--batchSize', type=int, default=64, help='input batch size')
@@ -44,16 +44,46 @@ if opt.cuda:
     netG = netG.cuda()
     noise = noise.cuda()
     label_array = label_array.cuda()
-    
+PIC4CLASS = [0]*43
+PIC4CLASS = [211, 2221, 2251, 1411, 1981, 1861, 421, 1441, 1441, 1471, 2011,
+             1321, 2101, 2161, 781, 631, 421, 1111, 1201, 211, 361, 331, 391, 511,271,
+             1501, 601,
+241,
+541,
+271,
+451,
+781,
+241,
+690,
+421,
+1201,
+391,
+211,
+2071,
+301,
+361,
+241,
+241]
+             
+# for i in glob.glob("../data/GTSRB/Final_Training/Images/*"):
+#     num = int(i.split("/")[-1])
+#     print (num)
+#     for ii in glob.glob(i + '/*'):
+#         PI5CLASS[num] += 1
+# pr
+count = 0
 if not os.path.exists('./generated_dataset'):
     os.mkdir('./generated_dataset')
 for label in range(0, 43):
     netG.load_state_dict(torch.load('./wgan_models/class_'+str(label) + '/netG_epoch_1999.pth'))
 
     path = '../data/WGAN_generated/'+ '0'*(5-len(str(label))) + str(label)
+    
     if not os.path.exists(path):
         os.mkdir(path)
-    for i in range(PIC4CLASS):
+
+        
+    for i in range(int(PIC4CLASS[count]/2)):
     
         noise.resize_(batchsize, nz, 1, 1).normal_(0, 1)
         noisev = Variable(noise, volatile = True) # totally freeze netG  
@@ -63,7 +93,7 @@ for label in range(0, 43):
         filename = '0'*(5-len(str(label))) + str(label) + '_' + '0'*(5-len(str(i))) + str(i)
         vutils.save_image(fake.data, '{0}/{1}.ppm'.format(path, str(i)))
         
-
+    count += 1
 
 
                 
